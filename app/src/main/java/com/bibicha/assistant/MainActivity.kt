@@ -1,0 +1,905 @@
+package com.bibicha.assistant
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.app.role.RoleManager
+import android.content.Intent
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.text.InputType
+import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
+import java.util.Locale
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+
+class MainActivity : Activity() {
+    private var chatLogView: TextView? = null
+    private var chatStatusView: TextView? = null
+    private var chatSendButton: Button? = null
+    private var chatTts: TextToSpeech? = null
+    private var chatTtsReady = false
+    private var speakNextReply = false
+    private var pendingChatSpeech: String? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        chatTts = TextToSpeech(this) { result ->
+            if (result == TextToSpeech.SUCCESS) {
+                val arabic = chatTts?.setLanguage(Locale("ar", "DZ")) ?: TextToSpeech.LANG_NOT_SUPPORTED
+                val language = if (arabic < TextToSpeech.LANG_AVAILABLE) chatTts?.setLanguage(Locale("ar")) ?: TextToSpeech.LANG_NOT_SUPPORTED else arabic
+                chatTtsReady = language >= TextToSpeech.LANG_AVAILABLE
+                if (chatTtsReady) {
+                    pendingChatSpeech?.let { pending ->
+                        chatTts?.speak(pending, TextToSpeech.QUEUE_FLUSH, null, "bibicha-chat-reply")
+                        pendingChatSpeech = null
+                    }
+                }
+            }
+        }
+        val title = TextView(this).apply {
+            text = "💜 إميليا\nمساعدتك الذكية"
+            textSize = 28f
+            setPadding(24, 36, 24, 16)
+        }
+        val status = TextView(this).apply {
+            text = "مساعدتك الذكية: محادثة وصوت وذاكرة محلية، مع ميزات الهاتف حسب الأذونات المتاحة."
+            textSize = 16f
+            setPadding(24, 12, 24, 16)
+        }
+        val systemTitle = TextView(this).apply {
+            text = "إعدادات مساعد الهاتف"
+            textSize = 20f
+            setPadding(8, 20, 8, 8)
+        }
+        val assistantRoleButton = Button(this).apply {
+            text = "تعيين إميليا كمساعد الهاتف"
+            setOnClickListener { requestAssistantRole() }
+        }
+        val callScreeningButton = Button(this).apply {
+            text = "تفعيل إعلان المكالمات الواردة"
+            setOnClickListener { requestCallScreeningRole() }
+        }
+        val notificationButton = Button(this).apply {
+            text = "تفعيل قراءة إشعارات الرسائل"
+            setOnClickListener {
+                SecureConfig.setNotificationReadingEnabled(this@MainActivity, true)
+                try {
+                    startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
+                } catch (_: Exception) {
+                    Toast.makeText(this@MainActivity, "افتح إعدادات الإشعارات وفعّل وصول إميليا.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
+        val emergencyTitle = TextView(this).apply {
+            text = "مشاركة الموقع في الطوارئ"
+            textSize = 20f
+            setPadding(8, 20, 8, 8)
+        }
+        val emergencyNumber = EditText(this).apply {
+            hint = "رقم شخص موثوق للطوارئ"
+            inputType = InputType.TYPE_CLASS_PHONE
+            setSingleLine(true)
+            setText(SecureConfig.emergencyNumber(this@MainActivity))
+        }
+        val saveEmergency = Button(this).apply {
+            text = "حفظ رقم الطوارئ"
+            setOnClickListener {
+                try {
+                    SecureConfig.saveEmergencyNumber(this@MainActivity, emergencyNumber.text.toString())
+                    Toast.makeText(this@MainActivity, "تم حفظ رقم الطوارئ مشفّراً.", Toast.LENGTH_LONG).show()
+                } catch (error: Exception) {
+                    Toast.makeText(this@MainActivity, error.message ?: "رقم غير صالح.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        val shareLocation = Button(this).apply {
+            text = "تحضير رسالة موقعي للطوارئ"
+            setOnClickListener { requestEmergencyLocation() }
+        }
+
+        val reminderButton = Button(this).apply {
+            text = "⏰ إنشاء تذكير جديد"
+            setOnClickListener { createReminder() }
+        }
+
+        val configTitle = TextView(this).apply {
+            text = "ربط الذكاء الاصطناعي"
+            textSize = 20f
+            setPadding(8, 20, 8, 8)
+        }
+        val configHint = TextView(this).apply {
+            text = "رابط خادم إميليا مضبوط مسبقاً. رمز الربط فقط يُحفظ مشفّراً على الهاتف."
+            textSize = 14f
+            setPadding(8, 0, 8, 8)
+        }
+        val workerUrl = EditText(this).apply {
+            hint = "https://اسم-العامل.workers.dev"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+            setText(SecureConfig.workerUrl(this@MainActivity))
+        }
+        val token = EditText(this).apply {
+            hint = "رمز ربط Android"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+        }
+        val saveConfig = Button(this).apply {
+            text = "حفظ إعدادات الربط بأمان"
+            setOnClickListener {
+                try {
+                    SecureConfig.save(this@MainActivity, workerUrl.text.toString(), token.text.toString())
+                    token.text?.clear()
+                    Toast.makeText(this@MainActivity, "تم حفظ الرابط والرمز مشفّراً على الهاتف.", Toast.LENGTH_LONG).show()
+                } catch (error: Exception) {
+                    Toast.makeText(this@MainActivity, error.message ?: "تعذر حفظ الإعدادات.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        val testConnection = Button(this).apply {
+            text = "اختبار اتصال خادم إميليا"
+            setOnClickListener { testWorkerConnection(workerUrl.text.toString(), token.text.toString(), status) }
+        }
+        val clearHistory = Button(this).apply {
+            text = "مسح ذاكرة المحادثة المحلية"
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("مسح سجل المحادثة؟")
+                    .setMessage("سيتم حذف المحادثات المحفوظة محلياً على هذا الهاتف.")
+                    .setNegativeButton("إلغاء", null)
+                    .setPositiveButton("مسح") { _, _ ->
+                        SecureConfig.clearHistory(this@MainActivity)
+                        chatLogView?.text = "تم مسح المحادثة. نبدأو من جديد 💜"
+                        Toast.makeText(this@MainActivity, "تم مسح سجل المحادثة المحفوظ على الهاتف.", Toast.LENGTH_LONG).show()
+                    }
+                    .show()
+            }
+        }
+
+        val memoryTitle = TextView(this).apply {
+            text = "الذاكرة الدائمة المشفّرة"
+            textSize = 20f
+            setPadding(8, 20, 8, 8)
+        }
+        val memoryInput = EditText(this).apply {
+            hint = "مثلاً: أفضل الردود بالدارجة الجزائرية"
+            minLines = 2
+        }
+        val saveMemory = Button(this).apply {
+            text = "احفظ المعلومة في ذاكرة إميليا"
+            setOnClickListener {
+                try {
+                    SecureConfig.addMemory(this@MainActivity, memoryInput.text.toString())
+                    memoryInput.text?.clear()
+                    Toast.makeText(this@MainActivity, "تحفظت المعلومة بأمان.", Toast.LENGTH_LONG).show()
+                } catch (error: Exception) {
+                    Toast.makeText(this@MainActivity, error.message ?: "تعذر حفظ المعلومة.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        val viewMemory = Button(this).apply {
+            text = "عرض المعلومات المحفوظة"
+            setOnClickListener {
+                val saved = SecureConfig.memories(this@MainActivity)
+                val details = (0 until saved.length()).mapNotNull { index ->
+                    saved.optString(index).takeIf { it.isNotBlank() }?.let { "• $it" }
+                }.joinToString("\n")
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("ذاكرة إميليا")
+                    .setMessage(details.ifBlank { "ما حفظنا حتى معلومة بعد." })
+                    .setPositiveButton("إغلاق", null)
+                    .show()
+            }
+        }
+        val clearMemory = Button(this).apply {
+            text = "مسح الذاكرة الدائمة"
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("مسح الذاكرة الدائمة؟")
+                    .setMessage("سيتم حذف كل المعلومات التي اخترت حفظها.")
+                    .setNegativeButton("إلغاء", null)
+                    .setPositiveButton("مسح") { _, _ ->
+                        SecureConfig.clearMemories(this@MainActivity)
+                        Toast.makeText(this@MainActivity, "تم مسح الذاكرة الدائمة.", Toast.LENGTH_LONG).show()
+                    }
+                    .show()
+            }
+        }
+
+
+        val exportBackup = Button(this).apply {
+            text = "حفظ نسخة احتياطية لإميليا في الهاتف"
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("حفظ نسخة احتياطية")
+                    .setMessage("النسخة تحتوي على الذاكرة والمحادثات وإعدادات الربط. احتفظ بها في مكان خاص ولا تشاركها.")
+                    .setNegativeButton("إلغاء", null)
+                    .setPositiveButton("متابعة") { _, _ ->
+                        startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "application/json"
+                            putExtra(Intent.EXTRA_TITLE, "Emilia-Backup.json")
+                        }, REQUEST_EXPORT_BACKUP)
+                    }.show()
+            }
+        }
+        val importBackup = Button(this).apply {
+            text = "استرجاع نسخة إميليا من الهاتف"
+            setOnClickListener {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "application/json"
+                }, REQUEST_IMPORT_BACKUP)
+            }
+        }
+
+        val chatTitle = TextView(this).apply {
+            text = "محادثة إميليا 💜"
+            textSize = 22f
+            setPadding(8, 24, 8, 8)
+        }
+        val chatStatus = TextView(this).apply {
+            text = "اكتب رسالة لإميليا بعد إعداد رابط الخادم."
+            textSize = 14f
+            setPadding(8, 4, 8, 8)
+        }
+        val chatLog = TextView(this).apply {
+            textSize = 16f
+            setPadding(12, 12, 12, 12)
+            setTextIsSelectable(true)
+        }
+        val chatInput = EditText(this).apply {
+            hint = "اكتب رسالتك هنا..."
+            minLines = 2
+            maxLines = 4
+        }
+        val sendChat = Button(this).apply {
+            text = "إرسال إلى إميليا"
+            setOnClickListener {
+                val message = chatInput.text.toString().trim()
+                if (message.isBlank()) {
+                    chatInput.error = "اكتب رسالة أولاً"
+                } else {
+                    chatInput.text?.clear()
+                    sendChatMessage(message, chatLog, chatStatus, this)
+                }
+            }
+        }
+        val voiceChat = Button(this).apply {
+            text = "🎙️ تكلم مع إميليا"
+            setOnClickListener { startVoiceInput() }
+        }
+        chatLogView = chatLog
+        chatStatusView = chatStatus
+        chatSendButton = sendChat
+        fun refreshChatLog() {
+            val history = SecureConfig.history(this@MainActivity)
+            val lines = ArrayList<String>()
+            for (index in 0 until history.length()) {
+                val item = history.optJSONObject(index) ?: continue
+                val role = if (item.optString("role") == "user") "أنت" else "إميليا"
+                lines.add("$role: ${item.optString("content")}")
+            }
+            chatLog.text = lines.joinToString("\n\n").ifBlank { "مازال ما بديناش المحادثة. قولّيلي سلام 💜" }
+        }
+        refreshChatLog()
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(20, 16, 20, 24)
+            addView(title)
+            addView(chatTitle)
+            addView(chatStatus)
+            addView(chatLog)
+            addView(chatInput)
+            addView(sendChat)
+            addView(voiceChat)
+            addView(status)
+            addView(systemTitle)
+            addView(assistantRoleButton)
+            addView(callScreeningButton)
+            addView(notificationButton)
+            addView(emergencyTitle)
+            addView(emergencyNumber)
+            addView(saveEmergency)
+            addView(shareLocation)
+            addView(reminderButton)
+            addView(configTitle)
+            addView(configHint)
+            addView(workerUrl)
+            addView(token)
+            addView(saveConfig)
+            addView(testConnection)
+            addView(clearHistory)
+            addView(memoryTitle)
+            addView(memoryInput)
+            addView(saveMemory)
+            addView(viewMemory)
+            addView(clearMemory)
+            addView(exportBackup)
+            addView(importBackup)
+        }
+        setContentView(ScrollView(this).apply { addView(content) })
+        if (intent.getBooleanExtra(EXTRA_EMERGENCY_SHARE, false)) requestEmergencyLocation()
+    }
+
+    private fun createReminder() {
+        val input = EditText(this).apply {
+            hint = "مثلاً: موعد الطبيب أو شرب الماء"
+            setSingleLine(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("تذكير جديد من إميليا")
+            .setMessage("اكتب واش تحب إميليا تفكرك به.")
+            .setView(input)
+            .setNegativeButton("إلغاء", null)
+            .setPositiveButton("اختيار الوقت") { _, _ ->
+                val title = input.text.toString().trim()
+                if (title.isBlank()) {
+                    Toast.makeText(this, "اكتب محتوى التذكير أولاً.", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                val now = java.util.Calendar.getInstance()
+                android.app.DatePickerDialog(
+                    this,
+                    { _, year, month, day ->
+                        android.app.TimePickerDialog(
+                            this,
+                            { _, hour, minute ->
+                                val whenToRemind = java.util.Calendar.getInstance().apply {
+                                    set(java.util.Calendar.YEAR, year)
+                                    set(java.util.Calendar.MONTH, month)
+                                    set(java.util.Calendar.DAY_OF_MONTH, day)
+                                    set(java.util.Calendar.HOUR_OF_DAY, hour)
+                                    set(java.util.Calendar.MINUTE, minute)
+                                    set(java.util.Calendar.SECOND, 0)
+                                    set(java.util.Calendar.MILLISECOND, 0)
+                                }
+                                if (whenToRemind.timeInMillis <= System.currentTimeMillis()) {
+                                    Toast.makeText(this, "اختار وقتاً في المستقبل.", Toast.LENGTH_LONG).show()
+                                    return@TimePickerDialog
+                                }
+                                val id = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+                                val reminderIntent = Intent(this, ReminderReceiver::class.java).apply {
+                                    putExtra(ReminderReceiver.EXTRA_TITLE, title)
+                                    putExtra(ReminderReceiver.EXTRA_ID, id)
+                                }
+                                val pending = android.app.PendingIntent.getBroadcast(
+                                    this,
+                                    id,
+                                    reminderIntent,
+                                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                                )
+                                val alarm = getSystemService(android.app.AlarmManager::class.java)
+                                alarm.setAndAllowWhileIdle(
+                                    android.app.AlarmManager.RTC_WAKEUP,
+                                    whenToRemind.timeInMillis,
+                                    pending
+                                )
+                                if (Build.VERSION.SDK_INT >= 33 &&
+                                    checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+                                }
+                                val formatted = java.text.SimpleDateFormat("yyyy/MM/dd - HH:mm", Locale.getDefault())
+                                    .format(whenToRemind.time)
+                                Toast.makeText(this, "تم ضبط التذكير: $formatted 💜", Toast.LENGTH_LONG).show()
+                            },
+                            now.get(java.util.Calendar.HOUR_OF_DAY),
+                            now.get(java.util.Calendar.MINUTE),
+                            true
+                        ).show()
+                    },
+                    now.get(java.util.Calendar.YEAR),
+                    now.get(java.util.Calendar.MONTH),
+                    now.get(java.util.Calendar.DAY_OF_MONTH)
+                ).apply {
+                    datePicker.minDate = System.currentTimeMillis()
+                }.show()
+            }
+            .show()
+    }
+
+    private fun testWorkerConnection(inputUrl: String, inputToken: String, statusView: TextView) {
+        val base = inputUrl.trim().trimEnd('/').removeSuffix("/chat")
+        // The save action clears the password field after encrypting the token.
+        // Reuse the encrypted token when the field is blank so "save, then test" works.
+        val token = inputToken.trim().ifBlank {
+            try { SecureConfig.token(this) } catch (_: Exception) { "" }
+        }
+        if (!SecureConfig.isValidWorkerUrl(base)) {
+            statusView.text = "أدخل عنوان Workers.dev صحيحاً دون مسار إضافي."
+            return
+        }
+        if (token.length < 32) {
+            statusView.text = "أدخل رمز الربط أولاً (32 حرفاً على الأقل)، ثم احفظه واختبر الاتصال."
+            return
+        }
+        statusView.text = "راني نتحقق من رابط الخادم ورمز الربط..."
+        Thread {
+            var connection: HttpURLConnection? = null
+            try {
+                // Verify the server has BOTH required secrets before checking the client token.
+                connection = (URL("$base/health").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 10000
+                    readTimeout = 10000
+                    setRequestProperty("Cache-Control", "no-cache")
+                }
+                val healthCode = connection.responseCode
+                val healthBody = (if (healthCode in 200..299) connection.inputStream else connection.errorStream)
+                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                val health = JSONObject(healthBody.ifBlank { "{}" })
+                connection.disconnect()
+                connection = null
+                if (healthCode !in 200..299 || !health.optBoolean("configured", false)) {
+                    throw IllegalStateException("الخادم غير مكتمل الإعداد: تحقق من OPENAI_API_KEY وMOBILE_APP_TOKEN في Cloudflare.")
+                }
+
+                connection = (URL("$base/auth-check").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 10000
+                    readTimeout = 10000
+                    setRequestProperty("Authorization", "Bearer $token")
+                    setRequestProperty("Cache-Control", "no-cache")
+                }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                val data = JSONObject(body.ifBlank { "{}" })
+                if (code !in 200..299 || !data.optBoolean("authorized", false)) {
+                    throw IllegalStateException(
+                        if (code == 401) "رمز الربط غير صحيح. راجع MOBILE_APP_TOKEN في Cloudflare."
+                        else "الخادم رجّع الخطأ $code."
+                    )
+                }
+                runOnUiThread {
+                    statusView.text = "الخادم مهيأ ومفتاح الذكاء الاصطناعي موجود ورمز الربط صحيح ✅ جرّب المحادثة."
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    statusView.text = error.message ?: "تعذر الوصول للخادم. تحقق من الرابط والإنترنت."
+                }
+            } finally {
+                connection?.disconnect()
+            }
+        }.start()
+    }
+
+    private fun startVoiceInput() {
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+            chatStatusView?.text = "اسمح باستعمال الميكروفون ثم عاود الضغط."
+            return
+        }
+        if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
+            chatStatusView?.text = "التعرف على الصوت غير متاح في هذا الهاتف."
+            return
+        }
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-DZ")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "ar-DZ")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "تكلم مع إميليا")
+        }
+        try {
+            startActivityForResult(intent, REQUEST_VOICE_CHAT)
+        } catch (_: Exception) {
+            chatStatusView?.text = "ما قدرناش نفتحو التعرف على الصوت."
+        }
+    }
+
+    private fun offlineReply(message: String): String {
+        val q = message.lowercase(Locale.ROOT)
+        return when {
+            listOf("سلام", "مرحبا", "bonjour", "salam").any { q.contains(it) } ->
+                "وعليكم السلام ❤️ أنا إميليا، راني هنا معاك. واش نقدر نعاونك اليوم؟"
+            listOf("اسمك", "شكون", "من انت").any { q.contains(it) } ->
+                "أنا إميليا، مساعدتك الشخصية 💜 نخدم بالوظائف المحلية المجانية، وقدرات المحادثة هنا محدودة دون نموذج سحابي."
+            listOf("شكرا", "merci").any { q.contains(it) } -> "بلا مزية ❤️ ديما هنا باش نعاونك."
+            listOf("كيف حالك", "واش راكي").any { q.contains(it) } -> "لاباس، شكراً على سؤالك 😊 قوليلي واش حاب نديرو اليوم؟"
+            listOf("نصيحة", "قلقان", "حزين", "تعبان").any { q.contains(it) } ->
+                "نسمعلك ❤️ خذ نفس عميق، وقسّم اللي مقلقك لخطوة صغيرة. إذا تحب احكيلي واش صرا ونرتبوها مع بعض."
+            listOf("خطة", "نظم", "مهام", "برنامج").any { q.contains(it) } ->
+                "نقدرو ننظموها: 1) حدّد الهدف. 2) اختار أهم 3 مهام. 3) ابدأ بأصغر خطوة. 4) راجع واش كملت. اكتبلي الهدف ونحضّرلك خطة."
+            listOf("طقس", "مطر", "رياح").any { q.contains(it) } ->
+                "الطقس الحي يحتاج إنترنت ومصدر محدث. إذا تبعثلي التوقعات اللي تظهرلك نفسرهالك."
+            else ->
+                "وصلتني رسالتك ❤️ نقدر نعاونك في التنظيم والتخطيط وصياغة الرسائل والنصائح البسيطة. هذي النسخة المحلية المجانية ما تستعملش نموذج ذكاء اصطناعي سحابي، لذلك قدراتها محدودة وما نعطيكش معلومة غير متحققة على أنها مؤكدة."
+        }
+    }
+
+    private fun handlePhoneCommand(message: String, chatStatus: TextView): Boolean {
+        val q = message.trim().lowercase(Locale.ROOT)
+        val apps = listOf(
+            listOf("واتساب", "whatsapp") to "com.whatsapp",
+            listOf("يوتيوب", "youtube") to "com.google.android.youtube",
+            listOf("خرائط", "maps", "الخريطة") to "com.google.android.apps.maps",
+            listOf("كروم", "chrome", "المتصفح") to "com.android.chrome",
+            listOf("انستغرام", "instagram") to "com.instagram.android",
+            listOf("فيسبوك", "facebook") to "com.facebook.katana",
+            listOf("رسائل", "sms", "messages") to "com.google.android.apps.messaging",
+            listOf("الهاتف", "اتصال", "dialer") to "com.google.android.dialer"
+        )
+        val isOpenRequest = listOf("افتح", "حل", "شغل", "روح ل", "open").any { q.contains(it) }
+        if (isOpenRequest) {
+            val target = apps.firstOrNull { (words, _) -> words.any { q.contains(it) } }
+            if (target != null) {
+                val launch = packageManager.getLaunchIntentForPackage(target.second)
+                if (launch != null) {
+                    startActivity(launch)
+                    chatStatus.text = "فتحتلك التطبيق 💜"
+                } else {
+                    chatStatus.text = "هذا التطبيق ما راهوش مثبت في هاتفك."
+                }
+                return true
+            }
+        }
+        val callPrefix = listOf("اتصل ب", "عيط ل", "رن ل", "call ")
+            .firstOrNull { q.startsWith(it) }
+        if (callPrefix != null) {
+            val number = message.trim().substring(callPrefix.length).trim()
+            if (number.isNotBlank()) {
+                startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")))
+                chatStatus.text = "فتحتلك لوحة الاتصال. راجع الرقم واضغط اتصال بنفسك."
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun sendChatMessage(message: String, chatLog: TextView, chatStatus: TextView, sendButton: Button) {
+        if (handlePhoneCommand(message, chatStatus)) return
+        val worker = SecureConfig.workerUrl(this)
+        val token = try { SecureConfig.token(this) } catch (_: Exception) { "" }
+        if (worker.isBlank() || token.isBlank()) {
+            val reply = offlineReply(message)
+            SecureConfig.addHistory(this, "user", message)
+            SecureConfig.addHistory(this, "assistant", reply)
+            val history = SecureConfig.history(this)
+            val lines = ArrayList<String>()
+            for (index in 0 until history.length()) {
+                val item = history.optJSONObject(index) ?: continue
+                val role = if (item.optString("role") == "user") "أنت" else "إميليا"
+                lines.add("$role: ${item.optString("content")}")
+            }
+            chatLog.text = lines.joinToString("\n\n")
+            chatStatus.text = "الوضع المجاني المحلي يعمل 💜 (قدرات محدودة دون نموذج سحابي)"
+            if (speakNextReply) {
+                if (chatTtsReady) chatTts?.speak(reply, TextToSpeech.QUEUE_FLUSH, null, "bibicha-chat-reply")
+                else pendingChatSpeech = reply
+            }
+            speakNextReply = false
+            return
+        }
+        sendButton.isEnabled = false
+        chatStatus.text = "إميليا راهي تكتبلك..."
+        Thread {
+            var connection: HttpURLConnection? = null
+            try {
+                connection = (URL("$worker/chat").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 15000
+                    readTimeout = 30000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    setRequestProperty("Authorization", "Bearer $token")
+                }
+                val payload = JSONObject()
+                    .put("message", message)
+                    .put("history", SecureConfig.history(this))
+                    .put("memory", SecureConfig.memories(this))
+                connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                val json = JSONObject(body.ifBlank { "{}" })
+                if (code !in 200..299) {
+                    throw IllegalStateException(json.optString("error", "تعذر الاتصال بالخادم ($code)."))
+                }
+                val reply = json.optString("reply").trim()
+                if (reply.isBlank()) throw IllegalStateException("ما وصلنيش رد واضح من إميليا.")
+                SecureConfig.addHistory(this, "user", message)
+                SecureConfig.addHistory(this, "assistant", reply)
+                runOnUiThread {
+                    val history = SecureConfig.history(this)
+                    val lines = ArrayList<String>()
+                    for (index in 0 until history.length()) {
+                        val item = history.optJSONObject(index) ?: continue
+                        val role = if (item.optString("role") == "user") "أنت" else "إميليا"
+                        lines.add("$role: ${item.optString("content")}")
+                    }
+                    chatLog.text = lines.joinToString("\n\n")
+                    chatStatus.text = "وصل الرد 💜"
+                    if (speakNextReply) {
+                        if (chatTtsReady) {
+                            chatTts?.speak(reply, TextToSpeech.QUEUE_FLUSH, null, "bibicha-chat-reply")
+                        } else {
+                            pendingChatSpeech = reply
+                        }
+                    }
+                    speakNextReply = false
+                }
+            } catch (error: Exception) {
+                // Keep Emilia useful without paid services: if Cloudflare/OpenAI is
+                // unavailable, fall back to the limited on-device reply rules.
+                val reply = offlineReply(message)
+                SecureConfig.addHistory(this, "user", message)
+                SecureConfig.addHistory(this, "assistant", reply)
+                runOnUiThread {
+                    val history = SecureConfig.history(this)
+                    val lines = ArrayList<String>()
+                    for (index in 0 until history.length()) {
+                        val item = history.optJSONObject(index) ?: continue
+                        val role = if (item.optString("role") == "user") "أنت" else "إميليا"
+                        lines.add("$role: ${item.optString("content")}")
+                    }
+                    chatLog.text = lines.joinToString("\n\n")
+                    chatStatus.text = "الخدمة السحابية غير متاحة؛ استعملت الوضع المحلي المجاني (قدرات محدودة) 💜"
+                    if (speakNextReply) {
+                        if (chatTtsReady) chatTts?.speak(reply, TextToSpeech.QUEUE_FLUSH, null, "emilia-chat-reply")
+                        else pendingChatSpeech = reply
+                    }
+                    speakNextReply = false
+                }
+            } finally {
+                connection?.disconnect()
+                runOnUiThread { sendButton.isEnabled = true }
+            }
+        }.start()
+    }
+
+    override fun onDestroy() {
+        pendingChatSpeech = null
+        chatTts?.stop()
+        chatTts?.shutdown()
+        chatTts = null
+        super.onDestroy()
+    }
+
+    private fun requestEmergencyLocation() {
+        if (SecureConfig.emergencyNumber(this).isBlank()) {
+            Toast.makeText(this, "احفظ رقم شخص موثوق للطوارئ أولاً.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION),
+                REQUEST_LOCATION
+            )
+            return
+        }
+        findCurrentLocation()
+    }
+
+    private fun findCurrentLocation() {
+        val fineGranted = checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val coarseGranted = checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!fineGranted && !coarseGranted) {
+            Toast.makeText(this, "إذن الموقع غير متاح. اسمح بالموقع ثم عاود.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val manager = getSystemService(LocationManager::class.java) ?: return
+        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+        val recent = try {
+            providers.mapNotNull { provider -> manager.getLastKnownLocation(provider) }
+                .filter { System.currentTimeMillis() - it.time <= 120_000L }
+                .maxByOrNull { it.time }
+        } catch (_: SecurityException) { null }
+        if (recent != null) {
+            prepareEmergencyMessage(recent)
+            return
+        }
+
+        val timeoutHandler = Handler(Looper.getMainLooper())
+        var timeoutAction: Runnable? = null
+        val listener = object : LocationListener {
+            override fun onLocationChanged(location: Location) {
+                timeoutAction?.let { timeoutHandler.removeCallbacks(it) }
+                try { manager.removeUpdates(this) } catch (_: Exception) {}
+                prepareEmergencyMessage(location)
+            }
+            override fun onProviderEnabled(provider: String) {}
+            override fun onProviderDisabled(provider: String) {}
+            @Deprecated("Deprecated by Android")
+            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+        }
+        var requested = false
+        for (provider in providers) {
+            try {
+                if (manager.isProviderEnabled(provider)) {
+                    manager.requestSingleUpdate(provider, listener, Looper.getMainLooper())
+                    requested = true
+                }
+            } catch (_: Exception) {}
+        }
+        if (requested) {
+            timeoutAction = Runnable {
+                try { manager.removeUpdates(listener) } catch (_: Exception) {}
+                Toast.makeText(this, "ما قدرناش نحددو موقعك. فعّل GPS وعاود.", Toast.LENGTH_LONG).show()
+            }
+            timeoutHandler.postDelayed(timeoutAction!!, 20_000L)
+        } else {
+            Toast.makeText(this, "فعّل GPS أو خدمة الموقع ثم عاود.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun prepareEmergencyMessage(location: Location) {
+        val number = SecureConfig.emergencyNumber(this).map { digit ->
+            when (digit) {
+                '٠' -> '0'; '١' -> '1'; '٢' -> '2'; '٣' -> '3'; '٤' -> '4'
+                '٥' -> '5'; '٦' -> '6'; '٧' -> '7'; '٨' -> '8'; '٩' -> '9'
+                else -> digit
+            }
+        }.joinToString("")
+        val mapLink = "https://maps.google.com/?q=${location.latitude},${location.longitude}"
+        val message = "أنا في حالة طارئة، هذا موقعي: $mapLink"
+        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$number")).apply {
+            putExtra("sms_body", message)
+        }
+        if (intent.resolveActivity(packageManager) != null) {
+            startActivity(intent)
+            Toast.makeText(this, "حضّرنا رسالة الموقع. اضغط إرسال بعد التأكد من المستلم.", Toast.LENGTH_LONG).show()
+        } else {
+            Toast.makeText(this, "ما لقيناش تطبيق رسائل لإرسال الموقع.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_LOCATION) {
+            if (grantResults.any { it == android.content.pm.PackageManager.PERMISSION_GRANTED }) {
+                findCurrentLocation()
+            } else {
+                Toast.makeText(this, "لازم تسمح بالموقع باش نحضّر رسالة الطوارئ.", Toast.LENGTH_LONG).show()
+            }
+        }
+        if (requestCode == REQUEST_MICROPHONE) {
+            if (grantResults.any { it == android.content.pm.PackageManager.PERMISSION_GRANTED }) {
+                startVoiceInput()
+            } else {
+                chatStatusView?.text = "الميكروفون ما تفعلش. تقدر تسمح به من إعدادات التطبيق."
+            }
+        }
+    }
+
+    private fun openFirstAvailableSettings(vararg actions: String): Boolean {
+        for (action in actions) {
+            try {
+                startActivity(Intent(action))
+                return true
+            } catch (_: Exception) {
+                // Try the next settings screen supported by this Android/Oppo build.
+            }
+        }
+        Toast.makeText(this, "ما قدرناش نفتحو إعدادات أندرويد. افتح إعدادات الهاتف وابحث عن التطبيقات الافتراضية.", Toast.LENGTH_LONG).show()
+        return false
+    }
+
+    private fun requestCallScreeningRole() {
+        Toast.makeText(this, "نفتحو إعداد إعلان المكالمات…", Toast.LENGTH_SHORT).show()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val roles = getSystemService(RoleManager::class.java)
+                if (roles != null && roles.isRoleAvailable(RoleManager.ROLE_CALL_SCREENING)) {
+                    if (roles.isRoleHeld(RoleManager.ROLE_CALL_SCREENING)) {
+                        Toast.makeText(this, "إميليا مفعّلة بالفعل لإعلان المكالمات.", Toast.LENGTH_LONG).show()
+                        return
+                    }
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(roles.createRequestRoleIntent(RoleManager.ROLE_CALL_SCREENING), REQUEST_CALL_SCREENING)
+                    return
+                }
+            } catch (_: Exception) {
+                // Fall back to Android settings below.
+            }
+        }
+        openFirstAvailableSettings(
+            "android.settings.MANAGE_DEFAULT_APPS_SETTINGS",
+            "android.settings.CALL_SCREENING_SETTINGS",
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+        )
+    }
+
+    private fun requestAssistantRole() {
+        Toast.makeText(this, "نفتحو إعداد اختيار المساعد…", Toast.LENGTH_SHORT).show()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val roles = getSystemService(RoleManager::class.java)
+                if (roles != null && roles.isRoleAvailable(RoleManager.ROLE_ASSISTANT)) {
+                    if (roles.isRoleHeld(RoleManager.ROLE_ASSISTANT)) {
+                        Toast.makeText(this, "إميليا معيّنة بالفعل كمساعد الهاتف.", Toast.LENGTH_LONG).show()
+                        return
+                    }
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(roles.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT), REQUEST_ASSISTANT)
+                    return
+                }
+            } catch (_: Exception) {
+                // ColorOS may not expose the role picker; try its settings screens.
+            }
+        }
+        openFirstAvailableSettings(
+            "android.settings.ASSIST_SETTINGS",
+            "android.settings.VOICE_INPUT_SETTINGS",
+            Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS
+        )
+    }
+
+    @Deprecated("Android role result callback")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == REQUEST_EXPORT_BACKUP && resultCode == RESULT_OK) {
+            val uri = data?.data
+            if (uri != null) {
+                try {
+                    contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use {
+                        it.write(SecureConfig.exportBackup(this))
+                    } ?: throw IllegalStateException("تعذر فتح ملف النسخة للحفظ.")
+                    Toast.makeText(this, "تحفظت النسخة الاحتياطية بنجاح 💜", Toast.LENGTH_LONG).show()
+                } catch (error: Exception) {
+                    Toast.makeText(this, error.message ?: "تعذر حفظ النسخة.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        if (requestCode == REQUEST_IMPORT_BACKUP && resultCode == RESULT_OK) {
+            val uri = data?.data
+            if (uri != null) {
+                try {
+                    val backup = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                        ?: throw IllegalStateException("تعذر قراءة ملف النسخة.")
+                    SecureConfig.importBackup(this, backup)
+                    Toast.makeText(this, "استرجعت إميليا الذاكرة والإعدادات بنجاح. 💜", Toast.LENGTH_LONG).show()
+                    recreate()
+                } catch (error: Exception) {
+                    Toast.makeText(this, error.message ?: "تعذر استرجاع النسخة.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        if (requestCode == REQUEST_VOICE_CHAT) {
+            if (resultCode == RESULT_OK) {
+                val spoken = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.trim().orEmpty()
+                if (spoken.isNotBlank()) {
+                    chatStatusView?.text = "سمعتك: $spoken"
+                    speakNextReply = true
+                    val log = chatLogView
+                    val status = chatStatusView
+                    val button = chatSendButton
+                    if (log != null && status != null && button != null) sendChatMessage(spoken, log, status, button)
+                } else {
+                    chatStatusView?.text = "ما وصلنيش كلام واضح. عاود."
+                }
+            } else {
+                chatStatusView?.text = "توقّف الاستماع. تقدر تعاود وقت تحب."
+            }
+        }
+        if (requestCode == REQUEST_ASSISTANT) {
+            val message = if (resultCode == RESULT_OK) "تم قبول تعيين إميليا كمساعد." else "لم يتم تغيير المساعد."
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        }
+        if (requestCode == REQUEST_CALL_SCREENING) {
+            val message = if (resultCode == RESULT_OK) "تم تفعيل إعلان المكالمات الواردة." else "لم يتم تفعيل ميزة إعلان المكالمات."
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    companion object { private const val REQUEST_ASSISTANT = 41; private const val REQUEST_CALL_SCREENING = 43; private const val REQUEST_LOCATION = 44; private const val REQUEST_VOICE_CHAT = 45; private const val REQUEST_MICROPHONE = 46; private const val REQUEST_NOTIFICATIONS = 47; const val EXTRA_EMERGENCY_SHARE = "bibicha_emergency_share"; private const val REQUEST_EXPORT_BACKUP = 48; private const val REQUEST_IMPORT_BACKUP = 49 }
+}
