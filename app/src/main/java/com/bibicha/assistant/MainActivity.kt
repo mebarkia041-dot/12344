@@ -124,7 +124,7 @@ class MainActivity : Activity() {
             setPadding(8, 20, 8, 8)
         }
         val configHint = TextView(this).apply {
-            text = "رابط خادم إميليا مضبوط مسبقاً. رمز الربط فقط يُحفظ مشفّراً على الهاتف."
+            text = "الربط السحابي غير مفعّل حالياً. لن نستخدم خادماً قديماً أو رابطاً غير موثوق."
             textSize = 14f
             setPadding(8, 0, 8, 8)
         }
