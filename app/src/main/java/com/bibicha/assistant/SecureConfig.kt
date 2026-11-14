@@ -22,7 +22,7 @@ object SecureConfig {
     private const val MEMORY_KEY = "personal_memory_encrypted"
     private const val EMERGENCY_NUMBER_KEY = "emergency_number_encrypted"
     private const val NOTIFICATION_READING_KEY = "notification_reading_enabled"
-    private const val DEFAULT_WORKER_URL = "https://bibicha.mebarkia041.workers.dev"
+    private const val DEFAULT_WORKER_URL = ""
 
     fun isValidWorkerUrl(value: String): Boolean {
         return try {
